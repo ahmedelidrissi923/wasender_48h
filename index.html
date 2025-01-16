@@ -1,0 +1,238 @@
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="initial-scale=0.1">
+  
+  <meta http-equiv="x-ua-compatible" content="ie=edge">
+  <title>UNTITLED</title>
+  
+  <!-- Bootstrap core CSS -->
+  <link href="css/bootstrap.min.css" rel="stylesheet">
+  <!-- Material Design Bootstrap -->
+  <link href="css/mdb.min.css" rel="stylesheet">
+
+  <link href="css/animated-counter-prograssbar.css" rel="stylesheet">
+
+  <link rel="stylesheet" href="https://use.fontawesome.com/releases/v5.7.0/css/all.css" integrity="sha384-lZN37f5QGtY3VHgisS14W3ExzMWZxybE1SJSEsQp9S+oqd12jhcu+A56Ebc1zFSJ" crossorigin="anonymous">
+  
+<style>
+
+.col-md-4 {
+    -ms-flex: 0 0 25%;
+    flex: 0 0 33.333333%;
+    max-width: 33.333333%;
+	}
+  .col-md-6 {
+    -ms-flex: 0 0 50%;
+    flex: 0 0 50%;
+    max-width: 50%;
+	}
+  .col-md-4 {
+    -ms-flex: 0 0 25%;
+    flex: 0 0 33.333333%;
+    max-width: 33.333333%;
+	}
+  .col-md-3 {
+    -ms-flex: 0 0 25%;
+    flex: 0 0 25%;
+    max-width: 25%;
+    margin-bottom: 15px;
+    margin-top: 15px;
+	}
+  .col-md-4 {
+    margin-bottom: 15px;
+    margin-top: 15px;
+  }
+  .full-width
+  {
+    width: 100%;
+    margin: 0;
+  }
+  .card-title
+  {
+    color: rgb(83, 83, 83);
+  }
+  .card{
+    box-shadow: 2px 2px 2px 2px rgb(241, 241, 241), 1px 1px 10px 5px rgb(228, 228, 228) !important;
+    
+  }
+  .progress
+  {
+    margin: 0;
+  }
+  .Poor{
+    background-color: yellow;
+    color: #750202;
+  }
+  .Weak{
+    background-color: #ffcf00;
+    color: #000000;
+  }
+  .Good
+  {
+    background-color: #90ff7c;
+    color: #656565;
+  }
+  .Better
+  {
+    background-color: #29e408;
+    color: #ffffff;
+  }
+  .Best
+  {
+    background-color: #126d01;
+    color: #ffffff;
+  }
+  .DontKnow
+  {
+    background-color: #8d8d8d;
+    color: #ffffff;
+  }
+  .center {
+    display: block;
+    margin-left: auto;
+    margin-right: auto;
+  }
+  .text-center
+  {
+    text-align: center;
+  }
+
+  .p-3
+  {
+    padding:10px !important;
+  }
+
+
+
+</style>
+
+
+
+
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fullscreen Image</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: #fff; /* خلفية بيضاء */
+      overflow: hidden; /* منع ظهور أي شريط تمرير */
+    }
+
+    img {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover; /* تمد الصورة لملء الشاشة */
+    }
+  </style>
+</head>
+<body>
+  <img src="images/fin.jpg" alt="Fullscreen Image">
+</body>
+</html>
+        
+
+
+
+
+  <div class="box" style="position: fixed;right: 0;top: 0;">
+    <div aria-label="Vertical button group" role="group" class="btn-group-vertical"> 
+      <button class="btn btn-primary zoom" type="button" style="margin: 0;padding: 5px;"><i class="fas fa-search-plus"></i></button> 
+      <button class="btn btn-primary zoom-out" type="button" style="padding: 5px;"><i class="fas fa-search-minus"></i></button>
+    </div>
+  </div>
+
+
+
+
+
+
+  <script src="config.js"></script>
+
+  <script type="text/javascript" src="js/jquery.min.js"></script>
+  
+  <script type="text/javascript" src="js/bootstrap.min.js"></script>
+  <script type="text/javascript" src="js/mdb.min.js"></script>
+  
+  <script type="text/javascript">
+
+    $(document).ready(function(){
+      var zoom = 1;
+      
+		$('.zoom').on('click', function(){
+			zoom += 0.1;
+      $('.mainsection').css('zoom',zoom)
+		});
+		$('.zoom-out').on('click', function(){
+			zoom -= 0.1;
+      $('.mainsection').css('zoom',zoom)
+		});
+    })
+    $("body").on("contextmenu",function(){
+       return false;
+    }); 
+  </script>
+
+  <script type="text/javascript">
+
+    function changeLabel(elementid,text)
+    {
+      $('#'+ elementid).text(text)
+    }
+    function changeLabelByClass(elementid,text)
+    {
+      $('.'+ elementid).text(text)
+    }
+
+    function setEnableDesable(elementid,text)
+    {
+      if(text=="True")
+      {
+        $('#'+ elementid).show()
+      }
+      if(text=="False")
+      {
+        $('#'+ elementid).hide()
+      }
+      
+    }
+
+var ctrlKeyDown = false;
+
+$(document).ready(function(){    
+    $(document).on("keydown", keydown);
+    $(document).on("keyup", keyup);
+});
+
+function keydown(e) { 
+
+    if ((e.which || e.keyCode) == 116 || ((e.which || e.keyCode) == 82 && ctrlKeyDown)) {
+        // Pressing F5 or Ctrl+R
+        e.preventDefault();
+    } else if ((e.which || e.keyCode) == 17) {
+        // Pressing  only Ctrl
+        ctrlKeyDown = true;
+    }
+};
+
+function keyup(e){
+    // Key up Ctrl
+    if ((e.which || e.keyCode) == 17) 
+        ctrlKeyDown = false;
+};
+  </script>
+
+
+</body>
+
+</html>
