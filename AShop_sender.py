@@ -1,1611 +1,881 @@
 __version__ = "1.2.1"
 
 ######################################
-import os
-import sys
-import json
-import time
-import urllib.parse
-import atexit
-import signal
-import copy
-import shutil
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+from PIL import Image, ImageTk, ImageDraw, ImageFont
+import tkinter.font as tkFont
+import json, os, platform
 
-from googleapiclient.discovery import build
+# ==================== إنشاء نافذة الجذر ====================
+root = tk.Tk()
+root.title("نظام الترقيم الذكي للتوصيلات")
+root.geometry("1000x800")
+root.minsize(800, 600)
 
-from PyQt5.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTableWidget,
-    QTableWidgetItem, QAbstractItemView, QLabel, QDialog, QDialogButtonBox, QTextEdit,
-    QLineEdit, QFileDialog, QMenu, QMessageBox, QScrollArea, QFrame, QInputDialog,
-    QPlainTextEdit, QRadioButton, QCheckBox, QTabWidget, QComboBox
-)
-from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QObject
-from PyQt5.QtGui import QContextMenuEvent
-from PyQt5.QtWidgets import QDialog, QVBoxLayout, QProgressBar, QLabel
+# ==================== المتغيرات العامة ====================
+img_path = None
+img_original = None
+base_preview_img = None
+preview_img = None
 
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.action_chains import ActionChains
-from webdriver_manager.chrome import ChromeDriverManager
+scale_x = 1.0
+scale_y = 1.0
 
-############################################################################
-# 1) تحميل/حفظ إعدادات الإدارة (multiple workers)
-############################################################################
+# قائمة التوصيلات؛ كل توصيلة عبارة عن قاموس يحتوي على "x", "y" و"val"
+positions = []
+undo_stack = []
+font_size = 30
+padding_rect = 4
 
-def load_admin_settings():
-    filename = "admin_settings.json"
-    if os.path.exists(filename):
-        try:
-            with open(filename, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except:
-            return {"workers": []}
-    return {"workers": []}
+zoom_factor = 1.0
+pan_offset = [0, 0]
+pan_start = (0, 0)
 
-def save_admin_settings(settings):
-    filename = "admin_settings.json"
-    with open(filename, "w", encoding="utf-8") as f:
-        json.dump(settings, f, ensure_ascii=False, indent=2)
+selected_marker_index = None
+drag_threshold = 10
 
-############################################################################
-# 2) تحميل/حفظ إعدادات Google Sheets (محفوظة في sheet_settings.json)
-############################################################################
+# خيار حفظ المشروع
+#   "pdf" (PDF فقط - الافتراضي)
+#   "images+pdf" (صور + PDF)
+#   "images" (صور فقط)
+save_option = tk.StringVar(root, value="pdf")
 
-def load_sheet_settings():
-    settings_file = "sheet_settings.json"
-    if os.path.exists(settings_file):
-        with open(settings_file, "r", encoding="utf-8") as f:
-            return json.load(f)
-    else:
-        return {"SPREADSHEET_ID": "", "RANGE_NAME": "", "API_KEY": ""}
+# إعدادات الخط
+use_custom_font = tk.BooleanVar(root, value=False)
+selected_font_family = tk.StringVar(root, value="Arial")
+selected_font_weight = tk.StringVar(root, value="normal")
+selected_font_slant = tk.StringVar(root, value="roman")
+selected_font_file = None
 
-def save_sheet_settings(settings):
-    settings_file = "sheet_settings.json"
-    with open(settings_file, "w", encoding="utf-8") as f:
-        json.dump(settings, f, ensure_ascii=False, indent=2)
-
-sheet_settings = load_sheet_settings()
-SPREADSHEET_ID = sheet_settings.get("SPREADSHEET_ID", "")
-RANGE_NAME = sheet_settings.get("RANGE_NAME", "")
-API_KEY = sheet_settings.get("API_KEY", "")
-
-############################################################################
-# 3) تنظيف جلسة المتصفح عند انتهاء البرنامج
-############################################################################
-
-def cleanup_driver():
-    global driver
-    if driver is not None:
-        try:
-            driver.quit()
-            print("تم إنهاء جلسة المتصفح بنجاح.")
-        except Exception as e:
-            print("خطأ أثناء إنهاء المتصفح:", e)
-
-atexit.register(cleanup_driver)
-
-def signal_handler(sig, frame):
-    cleanup_driver()
-    sys.exit(0)
-
-signal.signal(signal.SIGINT, signal_handler)
-signal.signal(signal.SIGTERM, signal_handler)
-
-############################################################################
-# 4) Google Sheets APIs
-############################################################################
-
-def fetch_sheet_data_public():
-    if not API_KEY or not SPREADSHEET_ID or not RANGE_NAME:
-        return []
-    service = build('sheets', 'v4', developerKey=API_KEY)
-    sheet = service.spreadsheets()
-    result = sheet.values().get(spreadsheetId=SPREADSHEET_ID, range=RANGE_NAME).execute()
-    values = result.get('values', [])
-    return values
-
-############################################################################
-# 5) دوال مساعدة
-############################################################################
-
-def convert_phone(phone):
-    phone = phone.strip()
-    if phone.startswith("0"):
-        return "212" + phone[1:]
-    elif phone.startswith("212"):
-        return phone
-    else:
-        return phone
-
-settings_data = {
-    "sleep_config": {
-        "sleep_open_chat": 8.0,
-        "sleep_send_text_wait": 1.0,
-        "sleep_after_send": 1.0,
-        "sleep_clear_box": 0.5,
-        "sleep_scroll_wait": 0.5,
-        "sleep_attach_click_retry": 1.0,
-        "sleep_file_attach_wait": 2.0
-    }
+font_mapping = {
+    "Arial": "arial.ttf",
+    "Times New Roman": "times.ttf",
+    "Courier New": "cour.ttf",
+    "Tahoma": "tahoma.ttf",
+    "Verdana": "verdana.ttf"
 }
 
-def get_sleep_time(key):
-    return settings_data.get("sleep_config", {}).get(key, 2.0)
+# حقول إدخال رقم البداية والنهاية
+ent_start = None
+ent_end = None
 
-def filter_non_bmp(text):
-    return ''.join(c for c in text if ord(c) <= 0xFFFF)
+# متغير لتحديد نمط التوزيع (default: التوزيع العادي، layered: توزيع طبقات)
+mode_var = tk.StringVar(root, value="default")
 
-############################################################################
-# 6) تحميل وحفظ القوالب (مع خاصية enabled)
-############################################################################
+# ==================== الدوال المساعدة (عرض معلومات، اختيار صورة ...) ====================
 
-def load_templates():
-    templates_file = "templates.json"
-    if not os.path.exists(templates_file):
+def show_help():
+    """
+    دالة لإظهار نافذة المساعدة أو معلومات حول الأداة.
+    """
+    messagebox.showinfo(
+        "حول الأداة",
+        "هذا برنامج نظام ترقيم ذكي للتوصيلات:\n"
+        "- يمكنك اختيار صورة وإضافة مواضع الأرقام عليها.\n"
+        "- يمكنك اختيار نمط التوزيع عادي أو على شكل طبقات.\n"
+        "- يمكنك توليد صفحات مرقمة (صور أو PDF) متسلسلة أو موزعة.\n"
+        "- يدعم حفظ وتحميل مشروع التوصيلات.\n\n"
+        "استخدام سعيد!"
+    )
+
+def select_image():
+    """
+    دالة لاختيار صورة من الجهاز وتهيئتها للمعاينة على الـ Canvas.
+    """
+    global img_path, img_original, base_preview_img, scale_x, scale_y
+    chosen = filedialog.askopenfilename(
+        filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp *.gif")]
+    )
+    if chosen:
+        img_path = chosen
+        try:
+            tmp_image = Image.open(chosen)
+            preview = tmp_image.copy()
+            # تصغير الصورة للمعاينة على الـCanvas
+            preview.thumbnail((canvas.winfo_width(), canvas.winfo_height()))
+            base_preview_img = preview.copy()
+
+            scale_x = tmp_image.width / base_preview_img.width
+            scale_y = tmp_image.height / base_preview_img.height
+
+            img_original = tmp_image
+            tmp_image.close()
+
+            lbl_status.config(text="✅ تم اختيار الصورة بنجاح")
+            update_preview()
+
+        except Exception as e:
+            messagebox.showerror("خطأ", f"فشل تحميل الصورة\n{e}")
+
+def reset_view():
+    """
+    دالة لإعادة تعيين مستوى التكبير/التصغير وإزاحة اللوحة.
+    """
+    global zoom_factor, pan_offset
+    zoom_factor = 1.0
+    pan_offset = [0, 0]
+    update_preview()
+
+# ==================== الدوال الخاصة بالتوزيع ====================
+
+def calculate_preview_values(start, end, positions):
+    """
+    توزيع عرض المعاينة للوضع العادي:
+    لكل توصيلة يتم حساب الرقم:
+      printed_value = start + (فهرس القيمة بين القيم الفريدة) % (end - start + 1)
+    """
+    total_numbers = end - start + 1
+    if total_numbers <= 0 or not positions:
         return []
+    unique_vals = sorted({pos['val'] for pos in positions})
+    val_to_number = {}
+    for i, val in enumerate(unique_vals):
+        assigned_number = start + (i % total_numbers)
+        val_to_number[val] = assigned_number
+    preview_numbers = [val_to_number[pos['val']] for pos in positions]
+    return preview_numbers
+
+def distribute_with_duplicates(start, end, positions):
+    """
+    توزيع الأرقام بالنمط العادي مع احترام التكرارات:
+    التوصيلات ذات نفس القيمة تحصل على نفس الرقم.
+    ثم توزيع الأرقام حسب عدد القيم الفريدة.
+    """
+    total_numbers = end - start + 1
+    if total_numbers <= 0 or not positions:
+        return []
+    unique_vals = sorted({pos['val'] for pos in positions})
+    val_to_sequence = {val: [] for val in unique_vals}
+
+    # تعبئة التسلسل
+    for i in range(total_numbers):
+        current = start + i
+        idx = i % len(unique_vals)  # توزيع بشكل دوري
+        val_to_sequence[unique_vals[idx]].append(current)
+
+    # إنشاء الصفحات (حيث كل صفحة لديها قيمة مرقمة لكل توصيلة)
+    distributed = []
+    max_len = max(len(seq) for seq in val_to_sequence.values())
+
+    for page in range(max_len):
+        page_values = []
+        for pos in positions:
+            seq = val_to_sequence[pos['val']]
+            value = seq[page] if page < len(seq) else None
+            page_values.append(value)
+        distributed.append(page_values)
+
+    return distributed
+
+def distribute_by_layers(start, end, positions):
+    """
+    توزيع الأرقام بنمط الطبقات (Layered):
+    مثال: إذا كانت التوصيلات 3 (مثلًا: أعلى، وسط، أسفل) والرقم من 1 إلى 9،
+    فإننا نحصل على:
+       الصفحة 1: 1 (أعلى)، 4 (وسط)، 7 (أسفل)
+       الصفحة 2: 2 (أعلى)، 5 (وسط)، 8 (أسفل)
+       الصفحة 3: 3 (أعلى)، 6 (وسط)، 9 (أسفل)
+    """
+    total_numbers = end - start + 1
+    if total_numbers <= 0 or not positions:
+        return []
+
+    arr = list(range(start, end + 1))
+    unique_vals = sorted({p["val"] for p in positions})
+    n = len(unique_vals)
+
+    # كل Layer يمسك قيمه بطريقة التدرج (مثلاً: layer[0] = [1, 4, 7], layer[1] = [2, 5, 8], ...)
+    layers = [arr[i::n] for i in range(n)]
+
+    # نحتاج أقصى عدد صفحات = أقصى طول لأي layer
+    max_len = max(len(layer) for layer in layers)
+
+    # خريطة لمعرفة أي فهرس يعبر عن أي توصيلة فريدة
+    val_to_idx = {v: i for i, v in enumerate(unique_vals)}
+
+    pages = []
+    for page_index in range(max_len):
+        page_vals = []
+        for pos in positions:
+            # اكتشاف أي Layer خاصة بقيمة هذا الـMarker
+            layer_index = val_to_idx[pos["val"]]
+            if page_index < len(layers[layer_index]):
+                page_vals.append(layers[layer_index][page_index])
+            else:
+                page_vals.append(None)
+        pages.append(page_vals)
+
+    return pages
+
+# ==================== دوال التحكم بالبكرة (تكبير/تصغير) ====================
+
+def on_mouse_wheel_zoom(event):
+    global zoom_factor
+    if event.delta:
+        if event.delta > 0:
+            zoom_factor *= 1.1
+        else:
+            zoom_factor /= 1.1
     else:
-        with open(templates_file, "r", encoding="utf-8") as f:
-            templates = json.load(f)
-        for t in templates:
-            if "enabled" not in t:
-                t["enabled"] = True
-        return templates
+        # في بعض الأنظمة قد يأتي الحدث بأرقام مختلفة (num=4 أو num=5)
+        if event.num == 4:
+            zoom_factor *= 1.1
+        elif event.num == 5:
+            zoom_factor /= 1.1
+    update_preview()
 
-def save_templates(templates):
-    for t in templates:
-        if "enabled" not in t:
-            t["enabled"] = True
-    with open("templates.json", "w", encoding="utf-8") as f:
-        json.dump(templates, f, ensure_ascii=False, indent=2)
+# ==================== دوال المعاينة على الـ Canvas ====================
 
-############################################################################
-# 7) إنشاء جلسة المتصفح
-############################################################################
+def update_preview():
+    """
+    دالة لرسم الصورة على الـ Canvas ووضع الأرقام عليها للمعاينة.
+    """
+    canvas.delete("all")
+    if base_preview_img is None:
+        return
 
-def create_driver(visible=True):
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    user_data_dir = os.path.join(base_dir, "whatsapp_profile")
-    options = Options()
-    if visible:
-        options.add_argument("--start-maximized")
-    else:
-        options.add_argument("--headless")
-        options.add_argument("--window-size=1400,900")
-    options.add_argument(f"--user-data-dir={user_data_dir}")
-    options.add_argument("--disable-extensions")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    service = Service(ChromeDriverManager().install())
-    driver_ = webdriver.Chrome(service=service, options=options)
-    driver_.get("https://web.whatsapp.com")
-    return driver_
+    # تكبير/تصغير الصورة وفق zoom_factor
+    new_w = int(base_preview_img.width * zoom_factor)
+    new_h = int(base_preview_img.height * zoom_factor)
+    resized_img = base_preview_img.resize((new_w, new_h), Image.LANCZOS)
 
-############################################################################
-# 8) المتغيرات العالمية
-############################################################################
+    global preview_img
+    preview_img = ImageTk.PhotoImage(resized_img)
+    canvas.create_image(pan_offset[0], pan_offset[1], anchor=tk.NW, image=preview_img, tags="image")
 
-driver = None
-ui_instance = None
-processed_orders = set()
-
-############################################################################
-# 9) دوال إرسال الرسائل دون خيط منفصل
-############################################################################
-
-def clear_message_box():
     try:
-        msg_box = WebDriverWait(driver, 10).until(
-            EC.element_to_be_clickable((By.CSS_SELECTOR, "footer div[role='textbox'][contenteditable='true']"))
-        )
-        msg_box.click()
-        ActionChains(driver).key_down(Keys.CONTROL).send_keys("a").key_up(Keys.CONTROL).send_keys(Keys.DELETE).perform()
-        time.sleep(get_sleep_time("sleep_clear_box"))
+        current_font_size = int(ent_font_size.get())
     except:
-        pass
+        current_font_size = font_size
 
-def send_text_in_one_message(text):
-    text = filter_non_bmp(text.strip())
-    if not text:
+    # الخط الخاص بالمعاينة (tkFont)
+    if use_custom_font.get():
+        preview_font_family = "Arial"  # عند استخدام ملف خط مخصص، نضبط خطًا افتراضيًا للمعاينة
+    else:
+        preview_font_family = selected_font_family.get()
+
+    preview_font = tkFont.Font(
+        family=preview_font_family,
+        size=current_font_size,
+        weight=selected_font_weight.get() if not use_custom_font.get() else "normal",
+        slant=selected_font_slant.get() if not use_custom_font.get() else "roman"
+    )
+
+    # أرقام البداية والنهاية
+    try:
+        start_num = int(ent_start.get().strip())
+        end_num = int(ent_end.get().strip())
+    except:
+        start_num = 1
+        end_num = len(positions)
+
+    # عند اختيار توزيع الطبقات، نستخدم الصفحة الأولى كمعاينة
+    if mode_var.get() == "layered":
+        pages_values = distribute_by_layers(start_num, end_num, positions)
+        preview_vals = list(pages_values[0]) if pages_values else []
+    else:
+        # توزيع عادي للمعاينة
+        preview_vals = calculate_preview_values(start_num, end_num, positions)
+
+    # رسم مربعات النصوص
+    for idx, (marker, text_val) in enumerate(zip(positions, preview_vals)):
+        if text_val is None:
+            continue
+
+        dx = marker["x"] * zoom_factor + pan_offset[0]
+        dy = marker["y"] * zoom_factor + pan_offset[1]
+        text = str(text_val)
+
+        text_w = preview_font.measure(text)
+        text_h = preview_font.metrics("linespace")
+
+        left = dx - (text_w/2 + padding_rect)
+        top = dy - (text_h/2 + padding_rect)
+        right = dx + (text_w/2 + padding_rect)
+        bottom = dy + (text_h/2 + padding_rect)
+
+        # إذا كانت التوصيلة محددة
+        if selected_marker_index == idx:
+            canvas.create_rectangle(left-2, top-2, right+2, bottom+2,
+                                    outline="orange", width=3, tags="mark")
+
+        # رسم الإطار الأحمر
+        canvas.create_rectangle(left, top, right, bottom, outline="red", width=2, tags="mark")
+        # رسم النص
+        canvas.create_text(dx, dy, text=text, fill="blue", font=preview_font, tags="mark")
+
+# ==================== دوال التعامل مع التوصيلات في الـ Canvas ====================
+
+def move_selected_marker(dx, dy):
+    """
+    تحريك التوصيلة المحددة بمقدار (dx, dy) على الصورة (بالمقاييس الحقيقية).
+    """
+    global selected_marker_index
+    if selected_marker_index is not None and 0 <= selected_marker_index < len(positions):
+        marker = positions[selected_marker_index]
+        # نحول dx, dy إلى قيم على الصورة قبل التكبير
+        marker["x"] += dx / zoom_factor
+        marker["y"] += dy / zoom_factor
+        update_preview()
+
+def handle_arrow_keys(event):
+    if event.keysym == "Up":
+        move_selected_marker(0, -5)
+    elif event.keysym == "Down":
+        move_selected_marker(0, 5)
+    elif event.keysym == "Left":
+        move_selected_marker(-5, 0)
+    elif event.keysym == "Right":
+        move_selected_marker(5, 0)
+
+def repeat_marker():
+    """
+    نسخ (تكرار) التوصيلة المحددة وإزاحتها قليلًا.
+    """
+    global selected_marker_index
+    if selected_marker_index is not None:
+        save_undo_state()
+        new_marker = positions[selected_marker_index].copy()
+        new_marker["x"] -= 15  # إزاحة 15px لليسار
+        positions.append(new_marker)
+        selected_marker_index = len(positions) - 1
+        update_preview()
+        lbl_status.config(text=f"🔁 تمت تكرار التوصيلة رقم {new_marker['val']}")
+
+def get_marker_at_in_base(x, y):
+    """
+    إرجاع فهرس التوصيلة (positions) إذا تم النقر عليها (بهامش معيّن drag_threshold).
+    """
+    tol = drag_threshold / zoom_factor
+    for idx, marker in enumerate(positions):
+        if abs(marker["x"] - x) <= tol and abs(marker["y"] - y) <= tol:
+            return idx
+    return None
+
+def save_undo_state():
+    """
+    حفظ حالة من أجل التراجع (undo).
+    """
+    undo_stack.append([m.copy() for m in positions])
+    if len(undo_stack) > 20:
+        undo_stack.pop(0)
+
+def undo_action():
+    global selected_marker_index
+    if undo_stack:
+        last_state = undo_stack.pop()
+        positions.clear()
+        positions.extend(last_state)
+        selected_marker_index = None
+        update_preview()
+        lbl_status.config(text="↩️ تم التراجع عن آخر تعديل")
+
+def on_left_button_press(event):
+    """
+    حدث النقر بالزر الأيسر لتحديد توصيلة إذا كانت تحته.
+    """
+    global selected_marker_index
+    bx = (event.x - pan_offset[0]) / zoom_factor
+    by = (event.y - pan_offset[1]) / zoom_factor
+    idx = get_marker_at_in_base(bx, by)
+    if idx is not None:
+        selected_marker_index = idx
+        lbl_status.config(text=f"✅ التوصيلة رقم {positions[idx]['val']} محددة")
+    else:
+        selected_marker_index = None
+        lbl_status.config(text="لم يتم تحديد توصيلة")
+    update_preview()
+
+def on_marker_drag(event):
+    """
+    سحب التوصيلة المحددة بالماوس.
+    """
+    if selected_marker_index is not None:
+        bx = (event.x - pan_offset[0]) / zoom_factor
+        by = (event.y - pan_offset[1]) / zoom_factor
+        positions[selected_marker_index]["x"] = bx
+        positions[selected_marker_index]["y"] = by
+        update_preview()
+
+def on_marker_release(event):
+    lbl_status.config(text="✅ تم تعديل المواقع")
+
+def on_right_button_press(event):
+    """
+    بدأ السحب بالزر الأيمن للفأرة من أجل التحريك (pan).
+    """
+    global pan_start
+    pan_start = (event.x, event.y)
+
+def on_pan_motion(event):
+    """
+    السحب بالزر الأيمن للفأرة لتحريك الصورة.
+    """
+    global pan_offset, pan_start
+    dx = event.x - pan_start[0]
+    dy = event.y - pan_start[1]
+    pan_offset[0] += dx
+    pan_offset[1] += dy
+    pan_start = (event.x, event.y)
+    update_preview()
+
+def on_pan_release(event):
+    pass
+
+# ==================== إضافة وحساب قيمة توصيلة جديدة ====================
+
+def next_marker_value_func():
+    """
+    الحصول على رقم توصيلة جديد غير مستخدم في positions.
+    """
+    used = {marker["val"] for marker in positions}
+    i = 1
+    while i in used:
+        i += 1
+    return i
+
+def add_marker():
+    global selected_marker_index
+    new_val = next_marker_value_func()
+    cw = canvas.winfo_width()
+    ch = canvas.winfo_height()
+    center_x = (cw/2 - pan_offset[0]) / zoom_factor
+    center_y = (ch/2 - pan_offset[1]) / zoom_factor
+    save_undo_state()
+    positions.append({"x": center_x, "y": center_y, "val": new_val})
+    selected_marker_index = len(positions) - 1
+    update_preview()
+    lbl_status.config(text=f"➕ تمت إضافة التوصيلة رقم {new_val}")
+
+# ==================== توليد الصفحات المرقمة ====================
+
+def generate_numbered_pages():
+    # 1) قراءة رقم البداية والنهاية
+    try:
+        start_str = ent_start.get().strip()
+        end_str = ent_end.get().strip()
+        start_num = int(start_str)
+        end_num = int(end_str)
+        if start_num > end_num:
+            raise ValueError
+        total = end_num - start_num + 1
+    except:
+        messagebox.showerror("خطأ", "يرجى إدخال أرقام بداية ونهاية صحيحة (مثلاً 001 و0010)")
+        return
+
+    if not positions:
+        messagebox.showerror("خطأ", "لم يتم تحديد أي توصيلة على الصورة")
+        return
+
+    # 2) الحصول على حجم الخط
+    try:
+        current_font_size = int(ent_font_size.get())
+    except:
+        current_font_size = font_size
+
+    # 3) تحديد ملف الخط
+    if use_custom_font.get():
+        if not selected_font_file:
+            messagebox.showerror("خطأ", "يرجى اختيار ملف الخط المخصص")
+            return
+        export_font_file = selected_font_file
+    else:
+        export_font_file = font_mapping.get(selected_font_family.get(), "arial.ttf")
+
+    export_font_size = int(current_font_size * scale_x)
+    try:
+        font_used = ImageFont.truetype(export_font_file, export_font_size)
+    except Exception as e:
+        messagebox.showerror("خطأ", f"تعذر تحميل الخط\n{e}")
+        return
+
+    # 4) فتح الصورة الأصلية
+    if not img_path or not os.path.exists(img_path):
+        messagebox.showerror("خطأ", "الصورة الأصلية غير متوفرة")
         return
     try:
-        clear_message_box()
-        msg_box = WebDriverWait(driver, 15).until(
-            EC.element_to_be_clickable((By.CSS_SELECTOR, "footer div[role='textbox'][contenteditable='true']"))
-        )
-        lines = text.split("\n")
-        for i, line in enumerate(lines):
-            line = filter_non_bmp(line)
-            if line:
-                msg_box.send_keys(line)
-            if i < len(lines) - 1:
-                ActionChains(driver).key_down(Keys.SHIFT).send_keys(Keys.ENTER).key_up(Keys.SHIFT).perform()
-        time.sleep(get_sleep_time("sleep_send_text_wait"))
-        msg_box.send_keys(Keys.ENTER)
-        time.sleep(get_sleep_time("sleep_send_text_wait"))
+        base_image = Image.open(img_path)
     except Exception as e:
-        ui_instance.log(f"[⚠️] خطأ في إرسال الرسالة النصية: {e}")
+        messagebox.showerror("خطأ", f"تعذر فتح الصورة الأصلية\n{e}")
+        return
 
-def click_main_send_button():
-    for _ in range(3):
+    # 5) تحديد اسم المجلد والملف بناءً على خيار الحفظ
+    base_name = os.path.splitext(os.path.basename(img_path))[0]
+    if save_option.get() == "pdf":
+        out_dir = filedialog.askdirectory(title="اختر مجلد الحفظ")
+        if not out_dir:
+            return
+        new_dir = out_dir
+    else:
+        out_dir = filedialog.askdirectory(title="اختر مجلد الحفظ")
+        if not out_dir:
+            return
+        new_dir = os.path.join(out_dir, base_name)
+        os.makedirs(new_dir, exist_ok=True)
+
+    # 6) إعداد tkFont لتصحيح مركز النص (لأخذ قياسات النص وقت الرسم)
+    if use_custom_font.get():
+        preview_font_family = "Arial"
+    else:
+        preview_font_family = selected_font_family.get()
+
+    tk_font_temp = tkFont.Font(
+        family=preview_font_family,
+        size=current_font_size,
+        weight=selected_font_weight.get() if not use_custom_font.get() else "normal",
+        slant=selected_font_slant.get() if not use_custom_font.get() else "roman"
+    )
+
+    # 7) توزيع الأرقام وفق وضع التوزيع المحدد
+    if mode_var.get() == "layered":
+        pages_values = distribute_by_layers(start_num, end_num, positions)
+    else:
+        pages_values = distribute_with_duplicates(start_num, end_num, positions)
+
+    pages = len(pages_values)
+    progress_bar["maximum"] = pages
+    progress_bar["value"] = 0
+
+    saved_images = []
+    width_str = len(start_str)  # لتنسيق النص (عدد الأصفار في البداية مثلاً)
+
+    for page_index, page_vals in enumerate(pages_values):
+        new_img = base_image.copy()
+        draw = ImageDraw.Draw(new_img)
+        for marker, printed_value in zip(positions, page_vals):
+            if printed_value is None:
+                continue
+
+            text_formatted = f"{printed_value:0{width_str}d}"  # تنسيق بالأصفار بناءً على طول start_str
+            actual_x = marker["x"] * scale_x
+            actual_y = marker["y"] * scale_y
+
+            tk_w = tk_font_temp.measure(text_formatted)
+            tk_h = tk_font_temp.metrics("linespace")
+
+            pil_bbox = font_used.getbbox(text_formatted)
+            pil_w = pil_bbox[2] - pil_bbox[0]
+            pil_h = pil_bbox[3] - pil_bbox[1]
+
+            # فروق تعويض لاختلاف قياس PIL عن قياس tkFont
+            corr_x = (tk_w - pil_w) / 2
+            corr_y = (tk_h - pil_h) / 2
+
+            text_x = actual_x - pil_w/2 + corr_x
+            text_y = actual_y - pil_h/2 + corr_y
+
+            draw.text((text_x, text_y), text_formatted, font=font_used, fill="blue")
+
+        page_name = os.path.join(new_dir, f"page_{page_index + 1:03}.png")
+        new_img.save(page_name)
+        saved_images.append(page_name)
+
+        progress_bar["value"] += 1
+        root.update_idletasks()
+
+    # توليد ملف PDF إن لزم
+    if save_option.get() in ("pdf", "images+pdf"):
+        pdf_path = os.path.join(new_dir, base_name + ".pdf")
         try:
-            send_btn = WebDriverWait(driver, 5).until(
-                EC.element_to_be_clickable((By.XPATH, "//div[@aria-label='Send' and @role='button']"))
-            )
-            driver.execute_script("arguments[0].scrollIntoViewIfNeeded();", send_btn)
-            time.sleep(get_sleep_time("sleep_scroll_wait"))
-            send_btn.click()
-            time.sleep(get_sleep_time("sleep_after_send"))
-            return
-        except:
-            ui_instance.log("[⚠️] لم نتمكن من النقر على زر الإرسال، إعادة المحاولة...")
-            time.sleep(get_sleep_time("sleep_attach_click_retry"))
-
-def send_attachment_with_caption(filepath, caption):
-    try:
-        cap = filter_non_bmp(caption.strip())
-        clear_message_box()
-        if cap:
-            msg_box = WebDriverWait(driver, 15).until(
-                EC.element_to_be_clickable((By.CSS_SELECTOR, "footer div[role='textbox'][contenteditable='true']"))
-            )
-            lines = cap.split("\n")
-            for i, line in enumerate(lines):
-                line = filter_non_bmp(line)
-                if line:
-                    msg_box.send_keys(line)
-                if i < len(lines) - 1:
-                    ActionChains(driver).key_down(Keys.SHIFT).send_keys(Keys.ENTER).key_up(Keys.SHIFT).perform()
-        time.sleep(get_sleep_time("sleep_clear_box"))
-
-        attach_btn = None
-        for _ in range(3):
-            try:
-                attach_btn = WebDriverWait(driver, 10).until(
-                    EC.element_to_be_clickable((By.XPATH, "//button[@title='Attach']"))
-                )
-                driver.execute_script("arguments[0].scrollIntoViewIfNeeded();", attach_btn)
-                time.sleep(get_sleep_time("sleep_scroll_wait"))
-                attach_btn.click()
-                time.sleep(get_sleep_time("sleep_attach_click_retry"))
-                break
-            except:
-                ui_instance.log("[⚠️] لم نتمكن من النقر على زر الإرفاق، إعادة المحاولة...")
-                time.sleep(get_sleep_time("sleep_attach_click_retry"))
-        if not attach_btn:
-            ui_instance.log("[⚠️] فشل العثور على زر الإرفاق.")
-            return
-
-        file_input = WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located((By.XPATH, "//input[@type='file' and contains(@accept, 'image')]"))
-        )
-        driver.execute_script("arguments[0].style.display = 'block';", file_input)
-        time.sleep(get_sleep_time("sleep_scroll_wait"))
-        file_input.send_keys(filepath)
-        time.sleep(get_sleep_time("sleep_file_attach_wait"))
-        click_main_send_button()
-        clear_message_box()
-    except Exception as e:
-        ui_instance.log(f"[⚠️] خطأ في إرسال المرفق: {e}")
-
-def process_message_template(template_content, row_dict):
-    msg = template_content
-    for key, value in row_dict.items():
-        if key.lower().strip() == "statu":
-            continue
-        placeholder = "{" + key + "}"
-        msg = msg.replace(placeholder, value)
-    return msg
-
-
-class LoadingDialog(QDialog):
-    def __init__(self, message="جاري الإرسال، يرجى الانتظار..."):
-        super().__init__()
-        self.setWindowTitle("يرجى الانتظار")
-        self.setModal(True)
-        self.setFixedSize(300, 100)
-        layout = QVBoxLayout(self)
-        self.label = QLabel(message)
-        layout.addWidget(self.label)
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 0)  # وضع الانتظار "غير محدد"
-        layout.addWidget(self.progress)
-        self.setLayout(layout)
-
-
-def send_message_to_new_number(phone_number, template_content, attachments=None, row_dict=None):
-    try:
-        # إنشاء نافذة التحميل
-        loading = LoadingDialog("جاري إرسال الرسالة، يرجى الانتظار...")
-        loading.show()
-        QApplication.processEvents()  # تحديث الواجهة
-
-        if attachments is None:
-            attachments = []
-
-        final_message = template_content
-        if row_dict:
-            final_message = process_message_template(template_content, row_dict)
-
-        ph = convert_phone(phone_number)
-        encoded_message = urllib.parse.quote(final_message, safe='')
-        chat_url = f"https://web.whatsapp.com/send?phone={ph}&text={encoded_message}"
-        driver.get(chat_url)
-
-        try:
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "footer div[role='textbox'][contenteditable='true']"))
-            )
-        except:
-            ui_instance.log(f"🔴 الرقم {ph} غير متاح على واتساب. تم التجاوز.")
-            loading.close()
-            return
-
-        time.sleep(get_sleep_time("sleep_open_chat"))
-        if final_message.strip():
-            send_text_in_one_message(final_message)
-
-        for att in attachments:
-            send_attachment_with_caption(att['filepath'], att.get('caption', ''))
-            time.sleep(get_sleep_time("sleep_after_send"))
-
-        ui_instance.log(f"✅ تم إرسال الرسالة بنجاح إلى {phone_number}.")
-        loading.close()
-    except Exception as e:
-        ui_instance.log(f"خطأ في إرسال الرسالة للرقم {phone_number}: {e}")
-        loading.close()
-
-############################################################################
-# 10) قاعدة بيانات محلية لحفظ حالات الطلب ومعالجة الطلبات
-############################################################################
-
-def load_local_status():
-    fn = "local_statu.json"
-    if os.path.exists(fn):
-        with open(fn, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
-
-def save_local_status(status_dict):
-    fn = "local_statu.json"
-    with open(fn, "w", encoding="utf-8") as f:
-        json.dump(status_dict, f, ensure_ascii=False, indent=2)
-
-def check_new_orders(ui_instance):
-    """
-    فحص Google Sheets وإرسال الرسائل عند الطلبات الجديدة
-    أو تغير حالتها (statu)، مع إشعار العمال (admin_settings) إذا لزم.
-    """
-    try:
-        data = fetch_sheet_data_public()
-        if not data or len(data) < 2:
-            ui_instance.log("الشيت لا يحتوي على بيانات كافية.")
-            return
-        headers = data[0]
-        rows = data[1:]
-        phone_index = None
-        statu_index = None
-        admin_settings = load_admin_settings()
-        workers = admin_settings.get("workers", [])
-
-        # إيجاد phone_index و statu_index
-        for i, h in enumerate(headers):
-            hh = h.lower().strip()
-            if hh == "phone":
-                phone_index = i
-            if hh == "statu":
-                statu_index = i
-
-        if phone_index is None:
-            ui_instance.log(f"لم يتم العثور على عمود 'Phone'. الأعمدة المتوفرة: {headers}")
-            return
-
-        local_statu_db = load_local_status()
-        templates = ui_instance.templates
-
-        # تحضير القالب الافتراضي (للطلبات الجديدة)
-        default_template = ui_instance.get_default_template_data()
-        if default_template.get("statu") == "__DEFAULT__":
-            found_index = None
-            for idx, t in enumerate(templates):
-                if t["statu"] == "__DEFAULT__":
-                    found_index = idx
-                    break
-            if found_index is not None:
-                templates[found_index] = default_template
-            else:
-                templates.append(default_template)
-
-        # المرور على كل صف (طلب)
-        for row in rows:
-            if not row or len(row) < 1:
-                continue
-            order_id = row[0].strip()
-            if not order_id:
-                continue
-
-            row_dict = {}
-            for i, val in enumerate(row):
-                if i < len(headers):
-                    row_dict[headers[i]] = val
-
-            if len(row) <= phone_index:
-                continue
-            phone_number = row[phone_index].strip()
-            if not phone_number:
-                continue
-
-            # إرسال القالب الافتراضي إذا كان طلب جديد
-            if order_id not in processed_orders:
-                dtempl = None
-                for t in templates:
-                    if t["statu"] == "__DEFAULT__" and t.get("enabled", True):
-                        dtempl = t
-                        break
-                if dtempl:
-                    # تحقق مما إذا كان تشيك بوكس الإرسال التلقائي مفعل
-                    if ui_instance.default_msg_widget.auto_send_checkbox.isChecked():
-                        ui_instance.log(f"طلب جديد {order_id}: إرسال الرسالة الافتراضية للرقم {phone_number}")
-                        attachments = dtempl.get("attachments", [])
-                        send_message_to_new_number(
-                            phone_number,
-                            dtempl["content"],
-                            attachments,
-                            row_dict
-                        )
-                    else:
-                        ui_instance.log(f"طلب جديد {order_id}: تم استقبال الطلب لكن الإرسال الافتراضي غير مفعل.")
-
-                # إشعار العمال (إذا كانت الخاصية __DEFAULT__ مفعلة)
-                    for w in workers:
-                        wphone = w.get("phone", "").strip()
-                        wname = w.get("name", "غير معروف")
-                        wnotif = w.get("notifications", {})
-                        wmsgs = w.get("message_templates", {})
-                        if wphone and wnotif.get("__DEFAULT__", False):
-                            msg_for_admin = wmsgs.get("__DEFAULT__", "")
-                            if msg_for_admin.strip():
-                                msg_for_admin = process_message_template(msg_for_admin, row_dict)
-                            else:
-                                msg_for_admin = f"طلب جديد {order_id} من العميل {phone_number}."
-                            send_message_to_new_number(wphone, msg_for_admin)
-                            ui_instance.log(
-                                f"تم إرسال الرسالة إلى عضو الإدارة: {wname} | رقم الطلب: {order_id} | الحالة: __DEFAULT__ | للعميل: {phone_number}")
-
-                processed_orders.add(order_id)
-
-            # التحقق من تغيّر الحقل statu
-            new_statu = ""
-            if statu_index is not None and len(row) > statu_index:
-                new_statu = row[statu_index].strip()
-            old_statu = local_statu_db.get(order_id, "").strip()
-
-            if new_statu and new_statu != old_statu:
-                matched_template = None
-                for t in templates:
-                    if t.get("enabled", True) and t["statu"] == new_statu and new_statu != "__DEFAULT__":
-                        matched_template = t
-                        break
-                if matched_template:
-                    ui_instance.log(f"تغيّر حالة الطلب {order_id}: {old_statu} => {new_statu}.")
-                    attachments = matched_template.get("attachments", [])
-                    send_message_to_new_number(phone_number, matched_template["content"], attachments, row_dict)
-
-                # إشعار العمال (إذا كانت الحالة مفعلة لديهم)
-                for w in workers:
-                    wphone = w.get("phone", "").strip()
-                    wname = w.get("name", "غير معروف")
-                    wnotif = w.get("notifications", {})
-                    wmsgs = w.get("message_templates", {})
-                    if wphone and wnotif.get(new_statu, False):
-                        msg_for_admin = wmsgs.get(new_statu, "")
-                        if msg_for_admin.strip():
-                            msg_for_admin = process_message_template(msg_for_admin, row_dict)
-                        else:
-                            msg_for_admin = f"تحديث طلب {order_id}: الحالة تغيرت إلى {new_statu}."
-                        send_message_to_new_number(wphone, msg_for_admin)
-                        ui_instance.log(
-                            f"تم إرسال الرسالة إلى عضو الإدارة: {wname} | رقم الطلب: {order_id} | الحالة: {new_statu} | للعميل: {phone_number}")
-
-                local_statu_db[order_id] = new_statu
-
-        save_local_status(local_statu_db)
-        save_templates(templates)
-
-    except Exception as e:
-        ui_instance.log(f"خطأ أثناء فحص الشيت: {e}")
-
-############################################################################
-# 11) أصناف المرفقات + واجهة التحرير (رسالة افتراضية)
-############################################################################
-
-class Attachment:
-    def __init__(self, filepath="", caption=""):
-        self.filepath = filepath
-        self.caption = caption
-
-class DefaultMessageWidget(QWidget):
-    def __init__(self, parent_ui, columns):
-        super().__init__()
-        self.parent_ui = parent_ui
-        self.columns = columns
-        self.attachments = []
-
-        layout = QVBoxLayout(self)
-        self.setLayout(layout)
-
-        lbl_title = QLabel("الرسالة الافتراضية (للطلبات الجديدة)")
-        lbl_title.setStyleSheet("font-weight: bold; font-size: 14px;")
-        layout.addWidget(lbl_title)
-
-        # أضف تشيك بوكس لتفعيل الإرسال التلقائي للرسالة الافتراضية
-        self.auto_send_checkbox = QCheckBox("تفعيل الإرسال التلقائي للرسالة الافتراضية")
-        self.auto_send_checkbox.setChecked(True)  # تُفعّل افتراضيًا
-        layout.addWidget(self.auto_send_checkbox)
-
-        txt_layout = QHBoxLayout()
-        self.text_edit = QTextEdit()
-        self.text_edit.setPlaceholderText("اكتب نص الرسالة الافتراضية هنا...")
-        txt_layout.addWidget(self.text_edit, 3)
-
-        var_frame = QFrame()
-        var_layout = QVBoxLayout()
-        var_layout.addWidget(QLabel("المتغيرات:"))
-        for var in self.columns:
-            btn = QPushButton(var)
-            btn.clicked.connect(lambda _, v=var: self.insert_variable(v))
-            var_layout.addWidget(btn)
-        var_frame.setLayout(var_layout)
-
-        scroll = QScrollArea()
-        scroll.setWidget(var_frame)
-        scroll.setWidgetResizable(True)
-        scroll.setFixedWidth(150)
-        txt_layout.addWidget(scroll, 1)
-        layout.addLayout(txt_layout)
-
-        attach_label = QLabel("المرفقات الافتراضية:")
-        attach_label.setStyleSheet("font-weight: bold;")
-        layout.addWidget(attach_label)
-
-        self.attach_table = QTableWidget()
-        self.attach_table.setColumnCount(2)
-        self.attach_table.setHorizontalHeaderLabels(["المسار", "التعليق"])
-        self.attach_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.attach_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.attach_table.setSelectionMode(QAbstractItemView.SingleSelection)
-        layout.addWidget(self.attach_table)
-
-        btn_layout = QHBoxLayout()
-        self.btn_add_file = QPushButton("إضافة مرفق")
-        self.btn_add_file.clicked.connect(self.add_file)
-        self.btn_remove_file = QPushButton("حذف المرفق")
-        self.btn_remove_file.clicked.connect(self.remove_file)
-        self.btn_set_caption = QPushButton("تعديل التعليق")
-        self.btn_set_caption.clicked.connect(self.set_caption)
-        btn_layout.addWidget(self.btn_add_file)
-        btn_layout.addWidget(self.btn_remove_file)
-        btn_layout.addWidget(self.btn_set_caption)
-        layout.addLayout(btn_layout)
-
-        btn_save = QPushButton("حفظ الرسالة الافتراضية")
-        btn_save.clicked.connect(self.save_default_message)
-        layout.addWidget(btn_save)
-
-        self.load_default_template()
-
-    def insert_variable(self, var):
-        cursor = self.text_edit.textCursor()
-        cursor.insertText(f"{{{var}}}")
-
-    def add_file(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "اختر مرفق")
-        if file_path:
-            self.attachments.append(Attachment(file_path, ""))
-            self.refresh_attach_table()
-
-    def remove_file(self):
-        row = self.attach_table.currentRow()
-        if 0 <= row < len(self.attachments):
-            self.attachments.pop(row)
-            self.refresh_attach_table()
-
-    def set_caption(self):
-        row = self.attach_table.currentRow()
-        if 0 <= row < len(self.attachments):
-            att = self.attachments[row]
-            cap, ok = QInputDialog.getMultiLineText(self, "تعديل التعليق", "التعليق:", att.caption)
-            if ok:
-                att.caption = cap
-                self.refresh_attach_table()
-
-    def refresh_attach_table(self):
-        self.attach_table.setRowCount(len(self.attachments))
-        for i, att in enumerate(self.attachments):
-            self.attach_table.setItem(i, 0, QTableWidgetItem(att.filepath))
-            self.attach_table.setItem(i, 1, QTableWidgetItem(att.caption))
-        self.attach_table.resizeColumnsToContents()
-
-    def load_default_template(self):
-        default_tpl = None
-        for t in self.parent_ui.templates:
-            if t.get("statu") == "__DEFAULT__":
-                default_tpl = t
-                break
-        if default_tpl:
-            self.text_edit.setPlainText(default_tpl["content"])
-            self.attachments = [Attachment(a["filepath"], a["caption"]) for a in default_tpl.get("attachments", [])]
-            self.refresh_attach_table()
-        else:
-            self.text_edit.clear()
-            self.attachments = []
-            self.refresh_attach_table()
-
-    def get_default_template_data(self):
-        return {
-            "statu": "__DEFAULT__",
-            "content": self.text_edit.toPlainText(),
-            "attachments": [{"filepath": a.filepath, "caption": a.caption} for a in self.attachments],
-            "enabled": True
-        }
-
-    def save_default_message(self):
-        default_data = self.get_default_template_data()
-        found_index = None
-        for i, t in enumerate(self.parent_ui.templates):
-            if t["statu"] == "__DEFAULT__":
-                found_index = i
-                break
-        if found_index is not None:
-            self.parent_ui.templates[found_index] = default_data
-        else:
-            self.parent_ui.templates.append(default_data)
-        save_templates(self.parent_ui.templates)
-        QMessageBox.information(self, "نجاح", "تم حفظ الرسالة الافتراضية بنجاح.")
-
-############################################################################
-# 12) الجدول TemplatesTable
-############################################################################
-
-class TemplatesTable(QTableWidget):
-    def __init__(self, parent_ui):
-        super().__init__()
-        self.parent_ui = parent_ui
-        self.setColumnCount(4)
-        self.setHorizontalHeaderLabels(["تفعيل", "Statu", "نص الرسالة (جزء)", "مرفقات"])
-        self.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.cellChanged.connect(self.onCellChanged)
-
-    def update_table(self):
-        normal_templates = [t for t in self.parent_ui.templates if t["statu"] != "__DEFAULT__"]
-        self.setRowCount(len(normal_templates))
-        for i, t in enumerate(normal_templates):
-            check_item = QTableWidgetItem()
-            check_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
-            state = Qt.Checked if t.get("enabled", True) else Qt.Unchecked
-            check_item.setCheckState(state)
-            self.setItem(i, 0, check_item)
-
-            statu_item = QTableWidgetItem(t["statu"])
-            preview = t["content"][:50] + "..." if len(t["content"]) > 50 else t["content"]
-            content_item = QTableWidgetItem(preview)
-            attach_count = len(t.get("attachments", []))
-            attach_item = QTableWidgetItem(str(attach_count))
-
-            self.setItem(i, 1, statu_item)
-            self.setItem(i, 2, content_item)
-            self.setItem(i, 3, attach_item)
-
-        self.resizeColumnsToContents()
-
-    def onCellChanged(self, row, column):
-        if column == 0:
-            normal_templates = [t for t in self.parent_ui.templates if t["statu"] != "__DEFAULT__"]
-            if row < 0 or row >= len(normal_templates):
-                return
-            item = self.item(row, column)
-            if item is not None:
-                new_state = item.checkState()
-                old_data = normal_templates[row]
-                real_index = self.parent_ui.templates.index(old_data)
-                self.parent_ui.templates[real_index]["enabled"] = (new_state == Qt.Checked)
-                save_templates(self.parent_ui.templates)
-
-    def contextMenuEvent(self, event):
-        index = self.indexAt(event.pos())
-        if not index.isValid():
-            return
-        menu = QMenu(self)
-        edit_action = menu.addAction("تعديل القالب")
-        duplicate_action = menu.addAction("نسخ القالب")
-        delete_action = menu.addAction("حذف القالب")
-        action = menu.exec_(self.mapToGlobal(event.pos()))
-        row = index.row()
-        if action == edit_action:
-            self.parent_ui.edit_template(row)
-        elif action == duplicate_action:
-            self.parent_ui.duplicate_template(row)
-        elif action == delete_action:
-            self.parent_ui.delete_template(row)
-
-############################################################################
-# 13) حوار تحرير التعليق للمرفقات
-############################################################################
-
-class CaptionEditorDialog(QDialog):
-    def __init__(self, parent=None, initial_caption="", variables=None):
-        super().__init__(parent)
-        self.setWindowTitle("تحرير تعليق المرفق")
-        self.result_caption = initial_caption
-        self.variables = variables if variables is not None else []
-
-        layout = QVBoxLayout(self)
-        self.text_edit = QTextEdit()
-        self.text_edit.setPlainText(initial_caption)
-        layout.addWidget(self.text_edit)
-
-        var_layout = QHBoxLayout()
-        var_label = QLabel("المتغيرات:")
-        var_layout.addWidget(var_label)
-        for var in self.variables:
-            btn = QPushButton(var)
-            btn.clicked.connect(lambda checked, v=var: self.insert_variable(v))
-            var_layout.addWidget(btn)
-        layout.addLayout(var_layout)
-
-        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btn_box.accepted.connect(self.accept)
-        btn_box.rejected.connect(self.reject)
-        layout.addWidget(btn_box)
-        self.setLayout(layout)
-
-    def insert_variable(self, var):
-        cursor = self.text_edit.textCursor()
-        cursor.insertText(f"{{{var}}}")
-
-    def get_caption(self):
-        return self.text_edit.toPlainText()
-
-    def accept(self):
-        self.result_caption = self.text_edit.toPlainText()
-        super().accept()
-
-############################################################################
-# 14) حوار إعدادات Google Sheets
-############################################################################
-
-class SheetSettingsDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("إعدادات Google Sheets")
-        layout = QVBoxLayout(self)
-
-        layout.addWidget(QLabel("معرف الشيت:"))
-        self.id_edit = QLineEdit()
-        layout.addWidget(self.id_edit)
-
-        layout.addWidget(QLabel("نطاق الشيت:"))
-        self.range_edit = QLineEdit()
-        layout.addWidget(self.range_edit)
-
-        layout.addWidget(QLabel("مفتاح API:"))
-        self.api_edit = QLineEdit()
-        layout.addWidget(self.api_edit)
-
-        self.test_btn = QPushButton("اختبار الاتصال")
-        self.test_btn.clicked.connect(self.test_connection)
-        layout.addWidget(self.test_btn)
-
-        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btn_box.accepted.connect(self.accept)
-        btn_box.rejected.connect(self.reject)
-        layout.addWidget(btn_box)
-
-        s = load_sheet_settings()
-        self.id_edit.setText(s.get("SPREADSHEET_ID", ""))
-        self.range_edit.setText(s.get("RANGE_NAME", ""))
-        self.api_edit.setText(s.get("API_KEY", ""))
-
-        self.setLayout(layout)
-        self.resize(400, 300)
-
-    def test_connection(self):
-        test_id = self.id_edit.text().strip()
-        test_range = self.range_edit.text().strip()
-        test_api = self.api_edit.text().strip()
-        if not (test_id and test_range and test_api):
-            QMessageBox.warning(self, "تنبيه", "يرجى تعبئة جميع الحقول قبل الاختبار.")
-            return
-        try:
-            service = build('sheets', 'v4', developerKey=test_api)
-            sheet = service.spreadsheets()
-            result = sheet.values().get(spreadsheetId=test_id, range=test_range).execute()
-            values = result.get('values', [])
-            if values:
-                QMessageBox.information(self, "نجاح", "تم الاتصال وجلب البيانات بنجاح.")
-            else:
-                QMessageBox.warning(self, "تنبيه", "اتصال ناجح لكن لا توجد بيانات.")
+            images_for_pdf = [Image.open(p).convert("RGB") for p in saved_images]
+            images_for_pdf[0].save(pdf_path, save_all=True, append_images=images_for_pdf[1:])
         except Exception as e:
-            QMessageBox.critical(self, "فشل الاتصال", str(e))
-
-    def get_settings(self):
-        return {
-            "SPREADSHEET_ID": self.id_edit.text().strip(),
-            "RANGE_NAME": self.range_edit.text().strip(),
-            "API_KEY": self.api_edit.text().strip()
-        }
-
-############################################################################
-# 15) إعدادات إشعارات الإدارة (متعددة العمال)
-############################################################################
-
-class SingleWorkerStatusWidget(QWidget):
-    """
-    عنصر واجهة لكل حالة (statu) كي يحدد العامل تفعيلها والرسالة الخاصة بها.
-    """
-    def __init__(self, status_name, enabled, message_text, columns):
-        super().__init__()
-        self.status_name = status_name
-        self.columns = columns
-
-        self.layout = QHBoxLayout(self)
-        self.setLayout(self.layout)
-
-        self.cb_enable = QCheckBox(f"تفعيل للحالة: {status_name}")
-        self.cb_enable.setChecked(enabled)
-        self.layout.addWidget(self.cb_enable)
-
-        self.btn_edit_message = QPushButton("تعديل الرسالة")
-        self.btn_edit_message.clicked.connect(self.edit_message)
-        self.layout.addWidget(self.btn_edit_message)
-
-        self.message_text = message_text
-
-    def edit_message(self):
-        dlg = MessageForStatusEditorDialog(None, self.message_text, self.columns, self.status_name)
-        if dlg.exec_() == QDialog.Accepted:
-            self.message_text = dlg.get_message()
-
-    def get_data(self):
-        return {
-            "status": self.status_name,
-            "enabled": self.cb_enable.isChecked(),
-            "message": self.message_text
-        }
-
-class MessageForStatusEditorDialog(QDialog):
-    """
-    نافذة لتحرير الرسالة الخاصة بحالة معيّنة (statu).
-    """
-    def __init__(self, parent, initial_msg, columns, status_name):
-        super().__init__(parent)
-        self.setWindowTitle(f"تحرير الرسالة - {status_name}")
-        self.result_msg = initial_msg
-        self.columns = columns
-
-        layout = QVBoxLayout(self)
-        self.text_edit = QTextEdit()
-        self.text_edit.setPlainText(initial_msg)
-        layout.addWidget(self.text_edit)
-
-        var_layout = QHBoxLayout()
-        var_label = QLabel("المتغيرات:")
-        var_layout.addWidget(var_label)
-        for var in self.columns:
-            btn = QPushButton(var)
-            btn.clicked.connect(lambda _, v=var: self.insert_variable(v))
-            var_layout.addWidget(btn)
-        layout.addLayout(var_layout)
-
-        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btn_box.accepted.connect(self.accept)
-        btn_box.rejected.connect(self.reject)
-        layout.addWidget(btn_box)
-
-        self.setLayout(layout)
-        self.resize(500, 400)
-
-    def insert_variable(self, var):
-        cursor = self.text_edit.textCursor()
-        cursor.insertText(f"{{{var}}}")
-
-    def get_message(self):
-        return self.text_edit.toPlainText()
-
-    def accept(self):
-        self.result_msg = self.text_edit.toPlainText()
-        super().accept()
-
-class WorkerTab(QWidget):
-    """
-    تبويب خاص بكل عامل، حيث يمكنه إدخال اسمه ورقمه وتفعيل/تعطيل حالات
-    (statu) مع الرسائل الخاصة بها.
-    """
-    def __init__(self, worker_data=None, all_statuses=None, columns=None, parent=None):
-        super().__init__(parent)
-        self.worker_data = worker_data or {
-            "name": "عامل جديد",
-            "phone": "",
-            "notifications": {},
-            "message_templates": {}
-        }
-        self.all_statuses = all_statuses if all_statuses else ["__DEFAULT__"]
-        self.columns = columns if columns else []
-
-        self.main_layout = QVBoxLayout(self)
-        self.setLayout(self.main_layout)
-
-        lbl_name = QLabel("اسم العامل:")
-        self.main_layout.addWidget(lbl_name)
-        self.name_edit = QLineEdit(self.worker_data.get("name", ""))
-        self.main_layout.addWidget(self.name_edit)
-
-        lbl_phone = QLabel("رقم الهاتف:")
-        self.main_layout.addWidget(lbl_phone)
-        self.phone_edit = QLineEdit(self.worker_data.get("phone", ""))
-        self.main_layout.addWidget(self.phone_edit)
-
-        self.status_widgets = {}
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        container = QWidget()
-        self.status_layout = QVBoxLayout(container)
-
-        for st in self.all_statuses:
-            enabled = self.worker_data.get("notifications", {}).get(st, False)
-            msg_text = self.worker_data.get("message_templates", {}).get(st, "")
-            w = SingleWorkerStatusWidget(st, enabled, msg_text, self.columns)
-            self.status_layout.addWidget(w)
-            self.status_widgets[st] = w
-
-        container.setLayout(self.status_layout)
-        scroll_area.setWidget(container)
-        self.main_layout.addWidget(scroll_area)
-        self.main_layout.addStretch()
-
-    def get_data(self):
-        wdata = {
-            "name": self.name_edit.text().strip(),
-            "phone": self.phone_edit.text().strip(),
-            "notifications": {},
-            "message_templates": {}
-        }
-        for st, widget in self.status_widgets.items():
-            d = widget.get_data()
-            wdata["notifications"][st] = d["enabled"]
-            wdata["message_templates"][st] = d["message"]
-        return wdata
-
-class AdminTabsDialog(QDialog):
-    """
-    نافذة لإدارة أكثر من عامل (tabs لكل عامل).
-    """
-    def __init__(self, parent=None, all_statuses=None, columns=None):
-        super().__init__(parent)
-        self.setWindowTitle("إعدادات إشعارات الإدارة (متعددة العمال)")
-        self.all_statuses = all_statuses if all_statuses else ["__DEFAULT__"]
-        self.columns = columns if columns else []
-
-        layout = QVBoxLayout(self)
-
-        btn_layout = QHBoxLayout()
-        self.btn_add_worker = QPushButton("إضافة عامل جديد")
-        self.btn_add_worker.clicked.connect(self.add_worker_tab)
-        btn_layout.addWidget(self.btn_add_worker)
-
-        self.btn_delete_worker = QPushButton("حذف العامل الحالي")
-        self.btn_delete_worker.clicked.connect(self.delete_current_worker_tab)
-        btn_layout.addWidget(self.btn_delete_worker)
-
-        layout.addLayout(btn_layout)
-
-        self.tab_widget = QTabWidget()
-        layout.addWidget(self.tab_widget)
-
-        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btn_box.accepted.connect(self.accept)
-        btn_box.rejected.connect(self.reject)
-        layout.addWidget(btn_box)
-
-        self.setLayout(layout)
-        self.resize(600, 500)
-
-        self.admin_settings = load_admin_settings()
-        workers = self.admin_settings.get("workers", [])
-        for w in workers:
-            self.add_worker_tab(w)
-
-    def add_worker_tab(self, worker_data=None):
-        if not worker_data:
-            worker_data = {
-                "name": "عامل جديد",
-                "phone": "",
-                "notifications": {},
-                "message_templates": {}
-            }
-        wtab = WorkerTab(worker_data, all_statuses=self.all_statuses, columns=self.columns, parent=self.tab_widget)
-        idx = self.tab_widget.addTab(wtab, worker_data.get("name", "عامل"))
-        self.tab_widget.setCurrentIndex(idx)
-
-    def delete_current_worker_tab(self):
-        idx = self.tab_widget.currentIndex()
-        if idx >= 0:
-            self.tab_widget.removeTab(idx)
-
-    def get_admin_settings(self):
-        new_workers = []
-        for i in range(self.tab_widget.count()):
-            page = self.tab_widget.widget(i)
-            wdata = page.get_data()
-            self.tab_widget.setTabText(i, wdata["name"])
-            new_workers.append(wdata)
-        return {"workers": new_workers}
-
-############################################################################
-# 16) فتح المتصفح في خيط منفصل (دون خيط للرسائل)
-############################################################################
-
-class BrowserOpenerWorker(QObject):
-    finished = pyqtSignal(object)
-    error = pyqtSignal(str)
-    log_signal = pyqtSignal(str)
-
-    def run(self):
-        """
-        المحاولة الأولى: خلفية (دون واجهة) باستخدام الجلسة
-        إذا لم يظهر pane-side نفتح واجهة مرئية لمسح QR.
-        """
-        # خلفية
-        try:
-            self.log_signal.emit("تسجيل الدخول إلى واتساب في الخلفية...")
-            dr = create_driver(visible=False)
-            WebDriverWait(dr, 15).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-            try:
-                WebDriverWait(dr, 15).until(EC.presence_of_element_located((By.ID, "pane-side")))
-                self.finished.emit(dr)
-                return
-            except:
-                self.log_signal.emit("لم يتم العثور على pane-side في الخلفية. نغلقه ونفتح واجهة مرئية لمسح QR.")
-                dr.quit()
-        except Exception as e:
-            self.error.emit(f"فشل فتح المتصفح في الخلفية: {e}")
-
-        # واجهة مرئية
-        self.log_signal.emit("فتح المتصفح بشكل مرئي لإتاحة مسح QR ...")
-        try:
-            dr_vis = create_driver(visible=True)
-            WebDriverWait(dr_vis, 60).until(EC.presence_of_element_located((By.ID, "pane-side")))
-            self.log_signal.emit("✅ تم تسجيل الدخول بنجاح (مرئي).")
-            dr_vis.quit()
-
-            dr_bg = create_driver(visible=False)
-            try:
-                WebDriverWait(dr_bg, 10).until(EC.presence_of_element_located((By.ID, "pane-side")))
-            except:
-                pass
-            self.finished.emit(dr_bg)
-        except Exception as e:
-            self.error.emit(f"⚠️ لم يتم تسجيل الدخول في الوقت المحدد في الوضع المرئي. يرجى إعادة المحاولة.\n{e}")
-            self.finished.emit(None)
-
-class BrowserOpenerThread(QThread):
-    driver_ready = pyqtSignal(object)
-    error_occurred = pyqtSignal(str)
-    log_signal = pyqtSignal(str)
-
-    def __init__(self):
-        super().__init__()
-        self.worker = BrowserOpenerWorker()
-        self.worker.moveToThread(self)
-        self.worker.finished.connect(self.on_finished)
-        self.worker.error.connect(self.error_occurred)
-        self.worker.log_signal.connect(self.log_signal)
-
-    def run(self):
-        self.worker.run()
-
-    def on_finished(self, driver_obj):
-        self.driver_ready.emit(driver_obj)
-
-############################################################################
-# 17) واجهة التطبيق الرئيسية
-############################################################################
-
-class WhatsAppSenderUI(QWidget):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("لوحة تحكم إرسال رسائل واتساب")
-        self.driver = None
-        self.monitor_timer = None
-        self.monitoring = False
-        self.driver_visible = False
-
-        # صندوق الإشعارات
-        self.notification_box = QPlainTextEdit()
-        self.notification_box.setReadOnly(True)
-
-        # تحميل القوالب
-        self.templates = load_templates()
-        # أعمدة جوجل شيت (بدون statu)
-        self.columns = self.fetch_columns_excluding_statu()
-
-        main_layout = QHBoxLayout(self)
-
-        # ===== الجانب الأيسر =====
-        left_layout = QVBoxLayout()
-
-        # جدول القوالب
-        self.templates_table = TemplatesTable(self)
-        left_layout.addWidget(self.templates_table)
-
-        # أزرار التحكم
-        btn_templates_layout = QHBoxLayout()
-        self.btn_add_template = QPushButton("إضافة قالب")
-        self.btn_add_template.clicked.connect(self.add_template)
-        btn_templates_layout.addWidget(self.btn_add_template)
-
-        self.btn_send_manual = QPushButton("إرسال يدوي")
-        self.btn_send_manual.clicked.connect(self.send_manual)
-        btn_templates_layout.addWidget(self.btn_send_manual)
-
-        self.monitor_radio = QRadioButton("تفعيل المراقبة")
-        self.monitor_radio.toggled.connect(self.toggle_monitoring)
-        btn_templates_layout.addWidget(self.monitor_radio)
-
-        left_layout.addLayout(btn_templates_layout)
-
-        # زر فتح المتصفح
-        self.open_browser_btn = QPushButton("فتح المتصفح (غير متصل)")
-        self.open_browser_btn.setStyleSheet("background-color: red;")
-        self.open_browser_btn.clicked.connect(self.open_browser)
-        left_layout.addWidget(self.open_browser_btn)
-
-        # حقل الإشعارات
-        notif_label = QLabel("إشعارات النظام:")
-        left_layout.addWidget(notif_label)
-        left_layout.addWidget(self.notification_box)
-
-        # زر إعدادات Google Sheets
-        self.sheet_settings_btn = QPushButton("إعدادات Google Sheets")
-        self.sheet_settings_btn.clicked.connect(self.open_sheet_settings)
-        left_layout.addWidget(self.sheet_settings_btn)
-
-        # زر إعدادات الإدارة
-        self.admin_settings_btn = QPushButton("إعدادات إشعارات الإدارة")
-        self.admin_settings_btn.clicked.connect(self.open_admin_settings)
-        left_layout.addWidget(self.admin_settings_btn)
-
-        left_widget = QWidget()
-        left_widget.setLayout(left_layout)
-        main_layout.addWidget(left_widget, 2)
-
-        # ===== الجانب الأيمن: واجهة الرسالة الافتراضية =====
-        self.default_msg_widget = DefaultMessageWidget(self, self.columns)
-        main_layout.addWidget(self.default_msg_widget, 3)
-
-        self.setLayout(main_layout)
-        self.resize(1200, 600)
-
-        # تحديث الجدول
-        self.refresh_templates_table()
-
-    def fetch_columns_excluding_statu(self):
-        data = fetch_sheet_data_public()
-        if data and len(data) > 0:
-            cols = data[0]
-            return [c for c in cols if c.lower().strip() != "statu"]
-        return []
-
-    def open_sheet_settings(self):
-        dlg = SheetSettingsDialog(self)
-        if dlg.exec_() == QDialog.Accepted:
-            new_settings = dlg.get_settings()
-            save_sheet_settings(new_settings)
-            global SPREADSHEET_ID, RANGE_NAME, API_KEY
-            SPREADSHEET_ID = new_settings.get("SPREADSHEET_ID", "")
-            RANGE_NAME = new_settings.get("RANGE_NAME", "")
-            API_KEY = new_settings.get("API_KEY", "")
-            self.log("تم تحديث إعدادات Google Sheets.")
-
-    def open_admin_settings(self):
-        # جميع الحالات (statu) الموجودة في القوالب
-        statuses = set()
-        for t in self.templates:
-            s = t.get("statu", "").strip()
-            if s:
-                statuses.add(s)
-        if "__DEFAULT__" not in statuses:
-            statuses.add("__DEFAULT__")
-        statuses = list(statuses)
-
-        dlg = AdminTabsDialog(self, all_statuses=statuses, columns=self.columns)
-        if dlg.exec_() == QDialog.Accepted:
-            new_data = dlg.get_admin_settings()
-            save_admin_settings(new_data)
-            self.log("تم تحديث إعدادات إشعارات الإدارة (متعددة العمال).")
-
-    def open_browser(self):
-        """
-        فتح المتصفح في خيط منفصل؛ إذا نجح، driver يصبح جاهزاً.
-        """
-        global driver
-        if self.driver:
-            try:
-                self.driver.quit()
-            except:
-                pass
-            self.driver = None
-
-        self.log("جاري التحضير...")
-        self.browser_thread = BrowserOpenerThread()
-        self.browser_thread.log_signal.connect(self.log)
-        self.browser_thread.driver_ready.connect(self.on_browser_ready)
-        self.browser_thread.error_occurred.connect(self.on_browser_error)
-        self.browser_thread.start()
-
-    def on_browser_ready(self, drv):
-        global driver
-        if drv is not None:
-            self.driver = drv
-            driver = self.driver
-            self.driver_visible = False
-            self.open_browser_btn.setText("واتساب متصل (خلفية)")
-            self.open_browser_btn.setStyleSheet("background-color: green;")
-            self.log("✅ تم تسجيل الدخول بنجاح (خلفية).")
-        else:
-            self.log("⚠️ فشل فتح المتصفح بشكل صحيح.")
-            self.open_browser_btn.setText("فتح المتصفح (غير متصل)")
-            self.open_browser_btn.setStyleSheet("background-color: red;")
-
-    def on_browser_error(self, error_msg):
-        self.log(error_msg)
-        self.open_browser_btn.setText("فتح المتصفح (غير متصل)")
-        self.open_browser_btn.setStyleSheet("background-color: red;")
-        self.driver = None
-
-    def refresh_templates_table(self):
-        self.templates_table.update_table()
-
-    def add_template(self):
-        dlg = TemplateEditorDialog(self, self.columns, None)
-        if dlg.exec_() == QDialog.Accepted:
-            tdata = dlg.get_template_data()
-            if not tdata["statu"]:
-                QMessageBox.warning(self, "تنبيه", "يجب تحديد حقل Statu لهذا القالب.")
-                return
-            if "enabled" not in tdata:
-                tdata["enabled"] = True
-            self.templates.append(tdata)
-            save_templates(self.templates)
-            self.refresh_templates_table()
-
-    def edit_template(self, row):
-        normal_templates = [t for t in self.templates if t["statu"] != "__DEFAULT__"]
-        if row < 0 or row >= len(normal_templates):
+            messagebox.showerror("خطأ", f"تعذر حفظ ملف PDF\n{e}")
             return
-        old_data = normal_templates[row]
-        real_index = self.templates.index(old_data)
-        dlg = TemplateEditorDialog(self, self.columns, old_data)
-        if dlg.exec_() == QDialog.Accepted:
-            new_data = dlg.get_template_data()
-            new_data["enabled"] = old_data.get("enabled", True)
-            self.templates[real_index] = new_data
-            save_templates(self.templates)
-            self.refresh_templates_table()
 
-    def duplicate_template(self, row):
-        normal_templates = [t for t in self.templates if t["statu"] != "__DEFAULT__"]
-        if row < 0 or row >= len(normal_templates):
-            return
-        old_data = normal_templates[row]
-        new_data = copy.deepcopy(old_data)
-        new_data["statu"] = new_data["statu"] + "_نسخة"
-        self.templates.append(new_data)
-        save_templates(self.templates)
-        self.refresh_templates_table()
+    # في حال حفظ PDF فقط، نحذف الصور المؤقتة
+    if save_option.get() == "pdf":
+        for p in saved_images:
+            if os.path.exists(p):
+                os.remove(p)
+        msg = f"تم توليد الملف PDF: {os.path.join(out_dir, base_name + '.pdf')}"
+    elif save_option.get() == "images+pdf":
+        msg = f"تم توليد الصور وملف PDF في المجلد: {new_dir}"
+    else:
+        msg = f"تم توليد الصور في المجلد: {new_dir}"
 
-    def delete_template(self, row):
-        normal_templates = [t for t in self.templates if t["statu"] != "__DEFAULT__"]
-        if row < 0 or row >= len(normal_templates):
-            return
-        old_data = normal_templates[row]
-        res = QMessageBox.question(self, "حذف قالب", "هل أنت متأكد من حذف هذا القالب؟",
-                                   QMessageBox.Yes | QMessageBox.No)
-        if res == QMessageBox.Yes:
-            self.templates.remove(old_data)
-            save_templates(self.templates)
-            self.refresh_templates_table()
+    messagebox.showinfo("تم", msg)
 
-    def send_manual(self):
-        """
-        إرسال يدوي دون خيط مستقل.
-        """
-        if not self.driver:
-            QMessageBox.warning(self, "تنبيه", "يرجى فتح المتصفح أولاً (التسجيل).")
-            return
-        dlg = ManualSendDialog(self, self.columns)
-        dlg.exec_()
+# ==================== دوال حفظ واستعادة المشروع ====================
 
-    def toggle_monitoring(self, checked):
-        if not self.driver and checked:
-            self.log("يرجى فتح المتصفح قبل البدء بالمراقبة.")
-            self.monitor_radio.setChecked(False)
-            return
-        if not (SPREADSHEET_ID and RANGE_NAME and API_KEY) and checked:
-            QMessageBox.warning(self, "تنبيه", "يرجى إدخال إعدادات Google Sheets قبل بدء المراقبة.")
-            self.monitor_radio.setChecked(False)
-            return
-        if checked:
-            self.monitor_timer = QTimer()
-            self.monitor_timer.timeout.connect(lambda: check_new_orders(self))
-            self.monitor_timer.start(5000)
-            self.monitoring = True
-            self.log("تم بدء المراقبة على الشيت.")
-        else:
-            if self.monitor_timer is not None:
-                self.monitor_timer.stop()
-            self.monitoring = False
-            self.log("تم إيقاف المراقبة.")
+def save_project():
+    if not img_path:
+        messagebox.showerror("خطأ", "لا توجد صورة حالية")
+        return
+    project = {
+        "img_path": img_path,
+        "positions": positions,
+        "font_size": ent_font_size.get(),
+        "use_custom_font": use_custom_font.get(),
+        "selected_font_file": selected_font_file,
+        "font_family": selected_font_family.get(),
+        "font_weight": selected_font_weight.get(),
+        "font_slant": selected_font_slant.get(),
+        "save_option": save_option.get(),
+        "start_num": ent_start.get(),
+        "end_num": ent_end.get()
+    }
+    path = filedialog.asksaveasfilename(
+        defaultextension=".json",
+        filetypes=[("Project file", "*.json")]
+    )
+    if path:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(project, f, ensure_ascii=False, indent=2)
+        messagebox.showinfo("تم", "تم حفظ المشروع")
 
-    def get_default_template_data(self):
-        return self.default_msg_widget.get_default_template_data()
+def load_project():
+    global img_path, img_original, base_preview_img, scale_x, scale_y, selected_font_file
+    chosen = filedialog.askopenfilename(filetypes=[("Project file", "*.json")])
+    if not chosen:
+        return
+    with open(chosen, "r", encoding="utf-8") as f:
+        project = json.load(f)
 
-    def log(self, text):
-        print(text)
-        self.notification_box.appendPlainText(text)
+    path_img = project.get("img_path")
+    if not path_img or not os.path.exists(path_img):
+        messagebox.showerror("خطأ", "تعذر العثور على الصورة الأصلية")
+        return
 
-############################################################################
-# 18) حوار تحرير القوالب + حوار الإرسال اليدوي
-############################################################################
+    try:
+        tmp_image = Image.open(path_img)
+        preview = tmp_image.copy()
+        preview.thumbnail((canvas.winfo_width(), canvas.winfo_height()))
+        base_preview_img = preview.copy()
 
-class TemplateEditorDialog(QDialog):
-    def __init__(self, parent, columns, template_data=None):
-        super().__init__(parent)
-        self.parent_ui = parent
-        self.columns = columns
-        self.attachments = []
-        self.setWindowTitle("إنشاء/تعديل القالب")
-        self.template_data = template_data or {"statu": "", "content": "", "attachments": [], "enabled": True}
+        scale_x = tmp_image.width / base_preview_img.width
+        scale_y = tmp_image.height / base_preview_img.height
 
-        self.main_layout = QVBoxLayout(self)
+        img_original = tmp_image
+        tmp_image.close()
+        img_path = path_img
+    except Exception as e:
+        messagebox.showerror("خطأ", f"فشل تحميل الصورة\n{e}")
+        return
 
-        self.main_layout.addWidget(QLabel("قيمة Statu لهذا القالب:"))
-        self.statu_line = QLineEdit()
-        self.statu_line.setPlaceholderText("مثال: شحن ، دفع ، ... إلخ")
-        self.statu_line.setText(self.template_data.get("statu", ""))
-        self.main_layout.addWidget(self.statu_line)
+    positions.clear()
+    positions.extend(project.get("positions", []))
 
-        txt_layout = QHBoxLayout()
-        self.text_edit = QTextEdit()
-        self.text_edit.setPlaceholderText("أدخل نص الرسالة هنا...")
-        self.text_edit.setPlainText(self.template_data.get("content", ""))
-        txt_layout.addWidget(self.text_edit, 3)
+    ent_font_size.delete(0, tk.END)
+    ent_font_size.insert(0, project.get("font_size", "30"))
+    use_custom_font.set(project.get("use_custom_font", False))
+    selected_font_file = project.get("selected_font_file")
+    selected_font_family.set(project.get("font_family", "Arial"))
+    selected_font_weight.set(project.get("font_weight", "normal"))
+    selected_font_slant.set(project.get("font_slant", "roman"))
+    lbl_font_file.config(
+        text=f"ملف الخط: {os.path.basename(selected_font_file) if selected_font_file else 'لم يتم اختيار ملف'}"
+    )
+    save_option.set(project.get("save_option", "pdf"))
 
-        var_frame = QFrame()
-        var_layout = QVBoxLayout()
-        var_layout.addWidget(QLabel("المتغيرات:"))
-        for var in self.columns:
-            btn = QPushButton(var)
-            btn.clicked.connect(lambda _, v=var: self.insert_variable(v))
-            var_layout.addWidget(btn)
-        var_frame.setLayout(var_layout)
+    ent_start.delete(0, tk.END)
+    ent_start.insert(0, project.get("start_num", "00001"))
 
-        scroll = QScrollArea()
-        scroll.setWidget(var_frame)
-        scroll.setWidgetResizable(True)
-        scroll.setFixedWidth(150)
-        txt_layout.addWidget(scroll, 1)
+    ent_end.delete(0, tk.END)
+    ent_end.insert(0, project.get("end_num", "01000"))
 
-        self.main_layout.addLayout(txt_layout)
+    update_preview()
+    messagebox.showinfo("تم", "تم تحميل المشروع")
 
-        self.attach_table = QTableWidget()
-        self.attach_table.setColumnCount(2)
-        self.attach_table.setHorizontalHeaderLabels(["المسار", "التعليق"])
-        self.attach_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.attach_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.attach_table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.main_layout.addWidget(self.attach_table)
+# ==================== اختصارات الكيبورد ====================
 
-        # تحميل المرفقات إن وجدت
-        if "attachments" in self.template_data:
-            self.attachments = [Attachment(a["filepath"], a["caption"]) for a in self.template_data["attachments"]]
+def bind_shortcuts():
+    root.bind("<Control-z>", lambda e: undo_action())
+    root.bind("<Control-s>", lambda e: save_project())
+    root.bind("<Control-o>", lambda e: load_project())
+    root.bind("<Control-r>", lambda e: repeat_marker())
+    root.bind("<Control-n>", lambda e: add_marker())
+    root.bind("<Up>", handle_arrow_keys)
+    root.bind("<Down>", handle_arrow_keys)
+    root.bind("<Left>", handle_arrow_keys)
+    root.bind("<Right>", handle_arrow_keys)
 
-        btn_layout = QHBoxLayout()
-        self.btn_add_att = QPushButton("إضافة مرفق")
-        self.btn_add_att.clicked.connect(self.add_file)
-        self.btn_del_att = QPushButton("حذف المرفق")
-        self.btn_del_att.clicked.connect(self.remove_file)
-        self.btn_edit_cap = QPushButton("تعديل التعليق")
-        self.btn_edit_cap.clicked.connect(self.set_caption)
-        btn_layout.addWidget(self.btn_add_att)
-        btn_layout.addWidget(self.btn_del_att)
-        btn_layout.addWidget(self.btn_edit_cap)
-        self.main_layout.addLayout(btn_layout)
+# ==================== واجهة المستخدم (Layout) ====================
 
-        self.refresh_attach_table()
+# نستخدم PanedWindow لتقسيم النافذة
+paned = tk.PanedWindow(root, orient=tk.HORIZONTAL, sashrelief="raised", sashwidth=5)
+paned.pack(fill=tk.BOTH, expand=True)
 
-        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btn_box.accepted.connect(self.accept)
-        btn_box.rejected.connect(self.reject)
-        self.main_layout.addWidget(btn_box)
+# اللوحة اليسرى للمعاينة
+frame_preview = tk.Frame(paned, bg="#f0f0f0")
+paned.add(frame_preview, minsize=600)
 
-        self.setLayout(self.main_layout)
-        self.resize(700, 500)
+canvas = tk.Canvas(frame_preview, bg="gray")
+canvas.pack(fill=tk.BOTH, expand=True)
+canvas.bind("<ButtonPress-1>", on_left_button_press)
+canvas.bind("<B1-Motion>", on_marker_drag)
+canvas.bind("<ButtonRelease-1>", on_marker_release)
+canvas.bind("<ButtonPress-3>", on_right_button_press)
+canvas.bind("<B3-Motion>", on_pan_motion)
+canvas.bind("<ButtonRelease-3>", on_pan_release)
 
-    def insert_variable(self, var):
-        cursor = self.text_edit.textCursor()
-        cursor.insertText(f"{{{var}}}")
+if platform.system() == "Windows":
+    canvas.bind("<MouseWheel>", on_mouse_wheel_zoom)
+else:
+    canvas.bind("<Button-4>", on_mouse_wheel_zoom)
+    canvas.bind("<Button-5>", on_mouse_wheel_zoom)
 
-    def add_file(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "اختر مرفق")
-        if file_path:
-            self.attachments.append(Attachment(file_path, ""))
-            self.refresh_attach_table()
+# اللوحة اليمنى (إطار رئيسي) - نضيف عليها سكروول بار
+frame_options = tk.Frame(paned, bg="#e0e0e0")
+paned.add(frame_options, minsize=300)
 
-    def remove_file(self):
-        row = self.attach_table.currentRow()
-        if 0 <= row < len(self.attachments):
-            self.attachments.pop(row)
-            self.refresh_attach_table()
+# عمل Canvas داخلي للتمرير
+options_canvas = tk.Canvas(frame_options, bg="#e0e0e0")
+options_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-    def set_caption(self):
-        row = self.attach_table.currentRow()
-        if 0 <= row < len(self.attachments):
-            att = self.attachments[row]
-            cap, ok = QInputDialog.getMultiLineText(self, "تعديل التعليق", "التعليق:", att.caption)
-            if ok:
-                att.caption = cap
-                self.refresh_attach_table()
+scrollbar = tk.Scrollbar(frame_options, orient="vertical", command=options_canvas.yview)
+scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-    def refresh_attach_table(self):
-        self.attach_table.setRowCount(len(self.attachments))
-        for i, att in enumerate(self.attachments):
-            self.attach_table.setItem(i, 0, QTableWidgetItem(att.filepath))
-            self.attach_table.setItem(i, 1, QTableWidgetItem(att.caption))
-        self.attach_table.resizeColumnsToContents()
+options_canvas.configure(yscrollcommand=scrollbar.set)
 
-    def get_template_data(self):
-        return {
-            "statu": self.statu_line.text().strip(),
-            "content": self.text_edit.toPlainText(),
-            "attachments": [{"filepath": a.filepath, "caption": a.caption} for a in self.attachments],
-            "enabled": self.template_data.get("enabled", True)
-        }
+# إطار داخلي نضع عليه عناصر الضبط
+frame_options_inner = tk.Frame(options_canvas, bg="#e0e0e0")
+options_canvas.create_window((0, 0), window=frame_options_inner, anchor="nw")
 
-class ManualSendDialog(QDialog):
-    """
-    حوار بسيط لإرسال رسالة يدوية لرقم معين مع مرفقات بشكل مباشر.
-    """
-    def __init__(self, parent, columns):
-        super().__init__(parent)
-        self.parent_ui = parent
-        self.columns = columns
-        self.attachments = []
+def on_frame_options_configure(event):
+    options_canvas.configure(scrollregion=options_canvas.bbox("all"))
 
-        self.setWindowTitle("إرسال رسالة يدوية")
-        layout = QVBoxLayout(self)
+frame_options_inner.bind("<Configure>", on_frame_options_configure)
 
-        layout.addWidget(QLabel("رقم الهاتف:"))
-        self.phone_line = QLineEdit()
-        layout.addWidget(self.phone_line)
+# ===== في الإطار الداخلي نضع كل الأدوات =====
 
-        txt_layout = QHBoxLayout()
-        self.text_edit = QTextEdit()
-        self.text_edit.setPlaceholderText("أدخل نص الرسالة هنا...")
-        txt_layout.addWidget(self.text_edit, 3)
+# تقسيمه إلى قسمين علوي وسفلي
+frame_top = tk.Frame(frame_options_inner, bg="#e0e0e0")
+frame_top.grid(row=0, column=0, sticky="ew")
+frame_top.grid_columnconfigure(0, weight=1)
+frame_top.grid_columnconfigure(1, weight=1)
 
-        var_frame = QFrame()
-        var_layout = QVBoxLayout()
-        var_layout.addWidget(QLabel("المتغيرات:"))
-        for var in self.columns:
-            btn = QPushButton(var)
-            btn.clicked.connect(lambda _, v=var: self.insert_variable(v))
-            var_layout.addWidget(btn)
-        var_frame.setLayout(var_layout)
-        scroll = QScrollArea()
-        scroll.setWidget(var_frame)
-        scroll.setWidgetResizable(True)
-        scroll.setFixedWidth(150)
-        txt_layout.addWidget(scroll, 1)
+frame_bottom = tk.Frame(frame_options_inner, bg="#e0e0e0")
+frame_bottom.grid(row=1, column=0, sticky="nsew", pady=(20,0))
+frame_bottom.grid_columnconfigure(0, weight=1)
 
-        layout.addLayout(txt_layout)
+# 1) القسم العلوي
+btn_select_img = tk.Button(
+    frame_top, text="📷 تغيير/اختيار صورة", command=select_image, bg="#d1e7dd", width=15
+)
+btn_select_img.grid(row=0, column=0, columnspan=2, pady=(0,10), sticky="ew")
 
-        self.attach_table = QTableWidget()
-        self.attach_table.setColumnCount(2)
-        self.attach_table.setHorizontalHeaderLabels(["المسار", "التعليق"])
-        self.attach_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.attach_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.attach_table.setSelectionMode(QAbstractItemView.SingleSelection)
-        layout.addWidget(self.attach_table)
+tk.Label(frame_top, text="🔠 حجم الخط:", bg="#e0e0e0").grid(row=1, column=0, sticky="e")
+ent_font_size = tk.Entry(frame_top, width=10)
+ent_font_size.insert(0, str(font_size))
+ent_font_size.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+ent_font_size.bind("<KeyRelease>", lambda event: update_preview())
 
-        btn_layout = QHBoxLayout()
-        self.btn_add_att = QPushButton("إضافة مرفق")
-        self.btn_add_att.clicked.connect(self.add_file)
-        self.btn_del_att = QPushButton("حذف المرفق")
-        self.btn_del_att.clicked.connect(self.remove_file)
-        self.btn_edit_cap = QPushButton("تعديل التعليق")
-        self.btn_edit_cap.clicked.connect(self.set_caption)
-        btn_layout.addWidget(self.btn_add_att)
-        btn_layout.addWidget(self.btn_del_att)
-        btn_layout.addWidget(self.btn_edit_cap)
-        layout.addLayout(btn_layout)
+tk.Label(frame_top, text="🚦 رقم البداية:", bg="#e0e0e0").grid(row=2, column=0, sticky="e")
+ent_start = tk.Entry(frame_top, width=10)
+ent_start.insert(0, "01")
+ent_start.grid(row=2, column=1, padx=5, pady=5, sticky="ew")
 
-        self.refresh_attach_table()
+tk.Label(frame_top, text="🚦 رقم النهاية:", bg="#e0e0e0").grid(row=3, column=0, sticky="e")
+ent_end = tk.Entry(frame_top, width=10)
+ent_end.insert(0, "010")
+ent_end.grid(row=3, column=1, padx=5, pady=5, sticky="ew")
 
-        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btn_box.accepted.connect(self.send_message)
-        btn_box.rejected.connect(self.reject)
-        layout.addWidget(btn_box)
+tk.Button(
+    frame_top, text="🔁 إعادة العرض", command=reset_view, bg="#c9cbc9", width=15
+).grid(row=4, column=0, columnspan=2, pady=5, sticky="ew")
 
-        self.setLayout(layout)
-        self.resize(700, 500)
+chk_custom_font = tk.Checkbutton(
+    frame_top, text="📝 استخدام خط مخصص", variable=use_custom_font, command=update_preview, bg="#e0e0e0"
+)
+chk_custom_font.grid(row=5, column=0, columnspan=2, pady=5, sticky="w")
 
-    def insert_variable(self, var):
-        cursor = self.text_edit.textCursor()
-        cursor.insertText(f"{{{var}}}")
+def select_font_file():
+    global selected_font_file
+    chosen = filedialog.askopenfilename(filetypes=[("Font files", "*.ttf *.otf")])
+    if chosen:
+        selected_font_file = chosen
+        lbl_font_file.config(text=f"ملف الخط: {os.path.basename(chosen)}")
+        update_preview()
 
-    def add_file(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "اختر مرفق")
-        if file_path:
-            self.attachments.append(Attachment(file_path, ""))
-            self.refresh_attach_table()
+btn_select_font = tk.Button(
+    frame_top, text="📂 اختر ملف خط", command=select_font_file, bg="#f8d7da", width=15
+)
+btn_select_font.grid(row=6, column=0, columnspan=2, pady=5, sticky="ew")
 
-    def remove_file(self):
-        row = self.attach_table.currentRow()
-        if 0 <= row < len(self.attachments):
-            self.attachments.pop(row)
-            self.refresh_attach_table()
+lbl_font_file = tk.Label(frame_top, text="لم يتم اختيار ملف الخط", bg="#e0e0e0")
+lbl_font_file.grid(row=7, column=0, columnspan=2, sticky="w", pady=2)
 
-    def set_caption(self):
-        row = self.attach_table.currentRow()
-        if 0 <= row < len(self.attachments):
-            att = self.attachments[row]
-            cap, ok = QInputDialog.getMultiLineText(self, "تعديل التعليق", "التعليق:", att.caption)
-            if ok:
-                att.caption = cap
-                self.refresh_attach_table()
+tk.Label(frame_top, text="📚 خط النظام:", bg="#e0e0e0").grid(row=8, column=0, columnspan=2, pady=(10,0))
+om_font_family = tk.OptionMenu(frame_top, selected_font_family, *tkFont.families(), command=lambda _: update_preview())
+om_font_family.config(bg="#fceabb")
+om_font_family.grid(row=9, column=0, columnspan=2, sticky="ew")
 
-    def refresh_attach_table(self):
-        self.attach_table.setRowCount(len(self.attachments))
-        for i, att in enumerate(self.attachments):
-            self.attach_table.setItem(i, 0, QTableWidgetItem(att.filepath))
-            self.attach_table.setItem(i, 1, QTableWidgetItem(att.caption))
-        self.attach_table.resizeColumnsToContents()
+tk.Label(frame_top, text="الوزن:", bg="#e0e0e0").grid(row=10, column=0, sticky="e")
+tk.OptionMenu(frame_top, selected_font_weight, "normal", "bold", command=lambda _: update_preview())\
+    .grid(row=10, column=1, sticky="ew")
 
-    def send_message(self):
-        phone_number = self.phone_line.text().strip()
-        if not phone_number:
-            QMessageBox.warning(self, "تنبيه", "يرجى إدخال رقم الهاتف.")
-            return
-        message_text = self.text_edit.toPlainText().strip()
-        attachments = [{"filepath": a.filepath, "caption": a.caption} for a in self.attachments]
+tk.Label(frame_top, text="الميل:", bg="#e0e0e0").grid(row=11, column=0, sticky="e")
+tk.OptionMenu(frame_top, selected_font_slant, "roman", "italic", command=lambda _: update_preview())\
+    .grid(row=11, column=1, sticky="ew")
 
-        send_message_to_new_number(phone_number, message_text, attachments)
-        QMessageBox.information(self, "نجاح", "تم إرسال الرسالة اليدوية.")
-        self.accept()
+# 2) القسم السفلي (عمليات التوصيلات)
+tk.Label(frame_bottom, text="📊 نمط التوزيع:", bg="#e0e0e0")\
+    .grid(row=0, column=0, sticky="w", pady=(15,0))
 
-############################################################################
-# 19) الدالة الرئيسية
-############################################################################
+tk.Radiobutton(frame_bottom, text="📐 توزيع عادي", variable=mode_var, value="default", bg="#e0e0e0")\
+    .grid(row=1, column=0, sticky="w", padx=2)
 
-def main():
-    app = QApplication(sys.argv)
-    qss_file = os.path.join(os.path.dirname(__file__), "style_sheet.qss")
-    if os.path.exists(qss_file):
-        with open(qss_file, "r", encoding="utf-8") as f:
-            app.setStyleSheet(f.read())
+tk.Radiobutton(frame_bottom, text="🧱 توزيع طبقات", variable=mode_var, value="layered", bg="#e0e0e0")\
+    .grid(row=2, column=0, sticky="w", padx=2)
 
-    window = WhatsAppSenderUI()
-    global ui_instance
-    ui_instance = window
-    window.show()
-    sys.exit(app.exec_())
+tk.Button(frame_bottom, text="➕ إضافة توصيلة", command=add_marker, bg="#d9ead3", width=15)\
+    .grid(row=3, column=0, pady=5, sticky="ew")
 
-if __name__ == "__main__":
-    main()
+tk.Button(frame_bottom, text="🔁 تكرار التوصيلة", command=repeat_marker, bg="#d1e7dd", width=15)\
+    .grid(row=4, column=0, pady=5, sticky="ew")
+
+tk.Button(frame_bottom, text="↩️ تراجع", command=undo_action, bg="#ffe5d9", width=15)\
+    .grid(row=5, column=0, pady=5, sticky="ew")
+
+# ===== قسم خيارات حفظ المشروع =====
+frame_save = tk.Frame(frame_bottom, bg="#e0e0e0")
+frame_save.grid(row=6, column=0, sticky="ew", pady=(20,0))
+tk.Label(frame_save, text="طريقة الحفظ:", bg="#e0e0e0")\
+    .grid(row=0, column=0, columnspan=3, pady=(0,5))
+
+tk.Radiobutton(frame_save, text="PDF فقط", variable=save_option, value="pdf", bg="#e0e0e0")\
+    .grid(row=1, column=0, sticky="w", padx=2)
+
+tk.Radiobutton(frame_save, text="صور + PDF", variable=save_option, value="images+pdf", bg="#e0e0e0")\
+    .grid(row=1, column=1, sticky="w", padx=2)
+
+tk.Radiobutton(frame_save, text="صور فقط", variable=save_option, value="images", bg="#e0e0e0")\
+    .grid(row=1, column=2, sticky="w", padx=2)
+
+# ===== قسم الإجراءات =====
+frame_actions = tk.Frame(frame_bottom, bg="#e0e0e0")
+frame_actions.grid(row=7, column=0, sticky="ew", pady=(20,0))
+for col in range(3):
+    frame_actions.grid_columnconfigure(col, weight=1)
+
+tk.Button(frame_actions, text="🚀 توليد الصفحات", command=generate_numbered_pages, bg="#cff4fc", width=15)\
+    .grid(row=0, column=0, sticky="ew", padx=5, pady=5)
+
+tk.Button(frame_actions, text="💾 حفظ المشروع", command=save_project, bg="#d1e7dd", width=15)\
+    .grid(row=0, column=1, sticky="ew", padx=5, pady=5)
+
+tk.Button(frame_actions, text="📂 تحميل مشروع", command=load_project, bg="#d1e7dd", width=15)\
+    .grid(row=0, column=2, sticky="ew", padx=5, pady=5)
+
+# ===== قسم الحالة =====
+frame_status = tk.Frame(frame_bottom, bg="#e0e0e0")
+frame_status.grid(row=8, column=0, sticky="ew", pady=(10,0))
+frame_status.grid_columnconfigure(0, weight=1)
+
+progress_bar = ttk.Progressbar(frame_status, orient="horizontal", mode="determinate")
+progress_bar.grid(row=0, column=0, sticky="ew", pady=5)
+
+lbl_status = tk.Label(frame_status, text="حدد توصيلة على الصورة للتعديل", bg="#e0e0e0", fg="black")
+lbl_status.grid(row=1, column=0, sticky="ew", pady=5)
+
+# زر عرض حول الأداة
+tk.Button(frame_bottom, text="حول الأداة", command=show_help, bg="#f8d7da", width=15)\
+    .grid(row=9, column=0, columnspan=1, pady=5, sticky="ew")
+
+frame_bottom.grid_rowconfigure(9, weight=0)
+
+# ==================== ربط الاختصارات وتشغيل النافذة ====================
+bind_shortcuts()
+root.mainloop()
